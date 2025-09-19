@@ -1,0 +1,6 @@
+CREATE USER mlflow WITH ENCRYPTED PASSWORD 'mlflow';
+CREATE DATABASE mlflow OWNER mlflow TEMPLATE template1;
+GRANT ALL PRIVILEGES ON DATABASE mlflow TO mlflow;
+
+\connect mlflow;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";

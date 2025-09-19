@@ -1,0 +1,10 @@
+pandas
+numpy
+scikit-learn
+mlflow
+boto3
+minio
+pyyaml
+great-expectations
+evidently
+psycopg2-binary

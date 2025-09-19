@@ -1,0 +1,9 @@
+project_name: telecom-churn-mlops
+target_column: churn
+test_size: 0.2
+random_state: 42
+model_family: baseline
+experiment_name: churn_baseline
+features_exclude:
+  - customer_id
+artifacts_bucket: ${S3_ARTIFACT_BUCKET}

@@ -1,0 +1,191 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${POSTGRES_DB}"
+      TZ: "${TZ}"
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h 127.0.0.1 -p 5432"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+    stop_grace_period: 30s
+
+  airflow-init:
+    image: apache/airflow:2.9.2-python3.9
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
+      AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW__CORE__FERNET_KEY}"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "${AIRFLOW__WEBSERVER__SECRET_KEY}"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: "${TZ}"
+      AIRFLOW_UID: "${AIRFLOW_UID}"
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: "${_AIRFLOW_WWW_USER_USERNAME}"
+      _AIRFLOW_WWW_USER_PASSWORD: "${_AIRFLOW_WWW_USER_PASSWORD}"
+      _AIRFLOW_WWW_USER_EMAIL: "${_AIRFLOW_WWW_USER_EMAIL}"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+    entrypoint: ["/bin/bash","-lc"]
+    command: >
+      export PATH=/home/airflow/.local/bin:$${PATH} &&
+      airflow db migrate &&
+      airflow connections create-default-connections || true &&
+      airflow users create
+        --role Admin
+        --username "${_AIRFLOW_WWW_USER_USERNAME}"
+        --password "${_AIRFLOW_WWW_USER_PASSWORD}"
+        --firstname "Admin" --lastname "User" --email "${_AIRFLOW_WWW_USER_EMAIL}" || true
+    # Avoid mounting DAGs here to prevent import errors during init
+    volumes:
+      - ./data:/opt/airflow/data
+      - ./airflow/requirements.txt:/requirements.txt
+    restart: "no"
+
+  airflow:
+    image: apache/airflow:2.9.2-python3.9
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
+      AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW__CORE__FERNET_KEY}"
+      AIRFLOW__WEBSERVER__SECRET_KEY: "${AIRFLOW__WEBSERVER__SECRET_KEY}"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: "${TZ}"
+      AIRFLOW__WEBSERVER__WEB_SERVER_HOST: "0.0.0.0"
+      AIRFLOW__WEBSERVER__WEB_SERVER_PORT: "8080"
+      AIRFLOW_UID: "${AIRFLOW_UID}"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      MLFLOW_TRACKING_URI: "${MLFLOW_TRACKING_URI}"
+      MLFLOW_S3_ENDPOINT_URL: "${MLFLOW_S3_ENDPOINT_URL}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
+      AWS_S3_FORCE_PATH_STYLE: "true"
+      S3_ARTIFACT_BUCKET: "${S3_ARTIFACT_BUCKET}"
+      PYTHONPATH: "/opt/airflow"
+    user: "${AIRFLOW_UID}:${AIRFLOW_GID}"
+    command: >
+      bash -lc "
+      export PATH=/home/airflow/.local/bin:$${PATH} ;
+      pip install --no-cache-dir -r /requirements.txt ;
+      mkdir -p /opt/airflow/logs /opt/airflow/dags ;
+      airflow db migrate ;
+      airflow users create -u ${_AIRFLOW_WWW_USER_USERNAME} -p ${_AIRFLOW_WWW_USER_PASSWORD} -f ${_AIRFLOW_WWW_USER_FIRSTNAME} -l ${_AIRFLOW_WWW_USER_LASTNAME} -r ${_AIRFLOW_WWW_USER_ROLE} -e ${_AIRFLOW_WWW_USER_EMAIL} >/dev/null 2>&1 || true ;
+      (airflow scheduler &) ;
+      exec airflow webserver --hostname 0.0.0.0 --port 8080
+      "
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/include:/opt/airflow/include
+      - ./airflow/requirements.txt:/requirements.txt
+      - ./data:/opt/airflow/data
+      - airflow_logs:/opt/airflow/logs
+  #  healthcheck:
+  #    test: ["CMD-SHELL", "python -c \"import socket,sys; socket.create_connection(('127.0.0.1',8080),5).close(); sys.exit(0)\" || exit 1"]
+  #    interval: 10s
+  #    timeout: 5s
+  #    retries: 120
+  #    start_period: 420s
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.16.0
+    restart: unless-stopped
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: "${MLFLOW_S3_ENDPOINT_URL}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
+      AWS_S3_FORCE_PATH_STYLE: "true"
+      TZ: "${TZ}"
+      GUNICORN_CMD_ARGS: "--bind=0.0.0.0:5000"
+      MLFLOW_HOST: "0.0.0.0"
+      MLFLOW_PORT: "5000"
+    command: >
+      bash -lc "
+      mlflow server
+        --backend-store-uri postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${MLFLOW_POSTGRES_DB}
+        --artifacts-destination s3://${S3_ARTIFACT_BUCKET}
+        --host 0.0.0.0
+        --port 5000
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:5001:5000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:5000', timeout=5); sys.exit(0)\" || exit 1"] 
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
+      TZ: "${TZ}"
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 5 sh -c 'cat < /dev/null > /dev/tcp/127.0.0.1/9000' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh","-lc"]
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
+      S3_ARTIFACT_BUCKET: "${S3_ARTIFACT_BUCKET}"
+    command: >
+      mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" &&
+      mc mb -p local/$S3_ARTIFACT_BUCKET || true &&
+      mc anonymous set download local/$S3_ARTIFACT_BUCKET || true
+    restart: "no"
+
+volumes:
+  postgres_data:
+  minio_data:
+  airflow_logs:
