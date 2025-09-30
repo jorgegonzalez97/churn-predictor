@@ -26,10 +26,13 @@ airflow-bash:
 	docker compose --env-file .env exec airflow bash
 
 mlflow-ui:
-	@echo "Open http://localhost:5000"
+	@echo "Open http://localhost:5001"
 
-minio-console:
+minio-ui:
 	@echo "Open http://localhost:9001"
+
+airflow-ui:
+	@echo "Open http://localhost:18080"
 
 create-bucket:
 	docker compose --env-file .env up minio-setup

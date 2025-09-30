@@ -8,8 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY airflow/requirements.txt /requirements.txt
-RUN pip install --no-cache-dir -r /requirements.txt \
-    -c https://raw.githubusercontent.com/apache/airflow/constraints-2.9.2/constraints-3.9.txt
 
 USER airflow
-
+RUN pip install --no-cache-dir -r /requirements.txt \
+    && pip install --no-cache-dir \
+        apache-airflow-providers-amazon \
+        apache-airflow-providers-postgres \
+        apache-airflow-providers-http

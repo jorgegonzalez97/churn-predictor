@@ -13,7 +13,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} -h 127.0.0.1 -p 5432"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\" -h 127.0.0.1 -p 5432"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -25,7 +25,10 @@ services:
     stop_grace_period: 30s
 
   airflow-init:
-    image: apache/airflow:2.9.2-python3.9
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: airflow-mlops:latest
     depends_on:
       postgres:
         condition: service_healthy
@@ -44,6 +47,8 @@ services:
       _AIRFLOW_WWW_USER_PASSWORD: "${_AIRFLOW_WWW_USER_PASSWORD}"
       _AIRFLOW_WWW_USER_EMAIL: "${_AIRFLOW_WWW_USER_EMAIL}"
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: "postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+    extra_hosts:
+      - "postgres:172.18.0.2"
     entrypoint: ["/bin/bash","-lc"]
     command: >
       export PATH=/home/airflow/.local/bin:$${PATH} &&
@@ -57,11 +62,13 @@ services:
     # Avoid mounting DAGs here to prevent import errors during init
     volumes:
       - ./data:/opt/airflow/data
-      - ./airflow/requirements.txt:/requirements.txt
     restart: "no"
 
   airflow:
-    image: apache/airflow:2.9.2-python3.9
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: airflow-mlops:latest
     restart: unless-stopped
     depends_on:
       postgres:
@@ -71,6 +78,8 @@ services:
       minio:
         condition: service_healthy
     environment:
+      PROJECT_BASE_DIR: "/opt/airflow"
+      GIT_PYTHON_REFRESH: "quiet"
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
       AIRFLOW__CORE__EXECUTOR: "LocalExecutor"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
@@ -88,12 +97,11 @@ services:
       AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
       AWS_S3_FORCE_PATH_STYLE: "true"
       S3_ARTIFACT_BUCKET: "${S3_ARTIFACT_BUCKET}"
-      PYTHONPATH: "/opt/airflow"
+      PYTHONPATH: "/opt/airflow:/opt/airflow/src"
     user: "${AIRFLOW_UID}:${AIRFLOW_GID}"
     command: >
       bash -lc "
       export PATH=/home/airflow/.local/bin:$${PATH} ;
-      pip install --no-cache-dir -r /requirements.txt ;
       mkdir -p /opt/airflow/logs /opt/airflow/dags ;
       airflow db migrate ;
       airflow users create -u ${_AIRFLOW_WWW_USER_USERNAME} -p ${_AIRFLOW_WWW_USER_PASSWORD} -f ${_AIRFLOW_WWW_USER_FIRSTNAME} -l ${_AIRFLOW_WWW_USER_LASTNAME} -r ${_AIRFLOW_WWW_USER_ROLE} -e ${_AIRFLOW_WWW_USER_EMAIL} >/dev/null 2>&1 || true ;
@@ -102,11 +110,15 @@ services:
       "
     ports:
       - "127.0.0.1:18080:8080"
+    extra_hosts:
+      - "postgres:172.18.0.2"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/include:/opt/airflow/include
-      - ./airflow/requirements.txt:/requirements.txt
+      - ./reports:/opt/airflow/reports
+      - ./models:/opt/airflow/models
+      - ./mlruns:/opt/airflow/mlruns
       - ./data:/opt/airflow/data
+      - ./src:/opt/airflow/src
       - airflow_logs:/opt/airflow/logs
   #  healthcheck:
   #    test: ["CMD-SHELL", "python -c \"import socket,sys; socket.create_connection(('127.0.0.1',8080),5).close(); sys.exit(0)\" || exit 1"]
@@ -142,6 +154,8 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:5001:5000"
+    extra_hosts:
+      - "postgres:172.18.0.2"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:5000', timeout=5); sys.exit(0)\" || exit 1"] 
       interval: 10s
@@ -174,17 +188,55 @@ services:
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint:
-      - /bin/sh
-      - -lc
-      - |
-          mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" \
-            && mc mb -p local/$S3_ARTIFACT_BUCKET || true \
-            && mc anonymous set download local/$S3_ARTIFACT_BUCKET || true
     environment:
       MINIO_ROOT_USER: "${MINIO_ROOT_USER}"
       MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
       S3_ARTIFACT_BUCKET: "${S3_ARTIFACT_BUCKET}"
+      MINIO_MODELS_BUCKET: "${MINIO_MODELS_BUCKET}"
+      MINIO_REPORTS_BUCKET: "${MINIO_REPORTS_BUCKET}"
+      MINIO_PREDICTIONS_BUCKET: "${MINIO_PREDICTIONS_BUCKET}"
+    entrypoint: ["/bin/sh", "-lc"]
+    command:
+      - |
+        set -eu
+        mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+        for bucket in "$S3_ARTIFACT_BUCKET" "$MINIO_MODELS_BUCKET" "$MINIO_REPORTS_BUCKET" "$MINIO_PREDICTIONS_BUCKET"; do
+          [ -n "$$bucket" ] || continue
+          mc mb -p local/$$bucket || true
+          mc version enable local/$$bucket || true
+          mc anonymous set download local/$$bucket || true
+        done
+        mc ls local
+    restart: "no"
+
+  postgres-monitoring-init:
+    image: postgres:15-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_USER: "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${POSTGRES_DB}"
+    volumes:
+      - ./sql/create_monitoring_tables.sql:/opt/sql/create_monitoring_tables.sql:ro
+    entrypoint:
+      - psql
+    network_mode: "service:postgres"
+    command:
+      - -h
+      - 127.0.0.1
+      - -p
+      - "5432"
+      - -U
+      - "${POSTGRES_USER}"
+      - -d
+      - "${POSTGRES_DB}"
+      - -v
+      - ON_ERROR_STOP=1
+      - -f
+      - /opt/sql/create_monitoring_tables.sql
     restart: "no"
 
 volumes:

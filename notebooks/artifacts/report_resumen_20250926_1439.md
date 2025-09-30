@@ -1,0 +1,1 @@
+Modelo campeón: CatBoostMétricas test: {'roc_auc': 0.6929270602715475, 'pr_auc': 0.6773528110035164, 'log_loss': 0.6329754556568948, 'brier': 0.22149355659517642}Umbral recomendado: 0.050Beneficio esperado: 1482500.00
