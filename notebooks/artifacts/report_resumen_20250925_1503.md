@@ -1,1 +1,0 @@
-Modelo campeón: LightGBMMétricas test: {'roc_auc': 0.6924201210141714, 'pr_auc': 0.676422937654789, 'log_loss': 0.6338860527368971, 'brier': 0.2218846172869462}Umbral recomendado: 0.000Beneficio esperado: 0.00

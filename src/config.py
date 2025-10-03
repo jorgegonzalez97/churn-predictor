@@ -7,9 +7,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-PROJECT_BASE_DIR = os.getenv("PROJECT_BASE_DIR")
-BASE_DIR = Path(PROJECT_BASE_DIR).resolve() if PROJECT_BASE_DIR else Path(__file__).resolve().parent.parent
-
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -110,14 +107,16 @@ class PipelineSettings:
     baseline_share: float = _get_env_float("BASELINE_SHARE", 0.2)
     random_state: int = _get_env_int("RANDOM_STATE", 753)
     psi_threshold: float = _get_env_float("PSI_THRESHOLD", 0.2)
-    pr_auc_shadow_threshold: float = _get_env_float("PR_AUC_SHADOW_THRESHOLD", 0.65)
-    optuna_n_trials: int = _get_env_int("OPTUNA_N_TRIALS", 10)
+    pr_auc_shadow_threshold: float = _get_env_float("PR_AUC_SHADOW_THRESHOLD", 0.5)
+    optuna_n_trials: int = _get_env_int("OPTUNA_N_TRIALS", 5)
     test_size: float = _get_env_float("MODEL_TEST_SIZE", 0.2)
     validation_size: float = _get_env_float("MODEL_VALID_SIZE", 0.1)
     max_training_rows: Optional[int] = (
         _get_env_int("MAX_TRAINING_ROWS", None) if os.getenv("MAX_TRAINING_ROWS") else None
     )
-    dq_sample_rows: Optional[int] = _get_env_int("DQ_SAMPLE_ROWS", 5000)
+    
+    # Fallos de memoria
+    dq_sample_rows = _get_env_int("DQ_SAMPLE_ROWS", 10000)
 
     def dq_sample_size(self) -> Optional[int]:
         if self.dq_sample_rows is None:
@@ -141,9 +140,6 @@ class PathsConfig:
 
     def baseline_parquet_path(self) -> Path:
         return self.data_dir / "baseline.parquet"
-
-    def current_snapshot_path(self) -> Path:
-        return self.data_dir / "current.parquet"
 
     def new_data_path(self) -> Path:
         return self.data_dir / "new_data.csv"

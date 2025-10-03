@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import joblib
 import mlflow.sklearn
@@ -32,6 +32,8 @@ class InferenceArtifacts:
     minio_uri: Optional[str]
     psi_global: float
     should_trigger_retrain: bool
+    rows_processed: int
+    metrics: Dict[str, float]
 
 
 MODEL_REGISTRY_NAME = "churn-risk-model"
@@ -118,18 +120,37 @@ def run_batch_inference() -> InferenceArtifacts:
     psi_df = compute_psi_table(baseline_df, new_data, schema)
     psi_global = float(psi_df["psi"].mean()) if not psi_df.empty else 0.0
     should_trigger_retrain = psi_global >= settings.pipeline.psi_threshold
-
-    mlflow_client = MLflowClientWrapper()
-    with mlflow_client.start_run(run_name="batch_inference", tags={"run_id": run_id}) as mlflow_run:
-        mlflow_client.log_metrics({"psi_global": psi_global})
-        mlflow_client.log_artifact(preds_path, artifact_path="predictions")
-        mlflow_client.log_dict(psi_df.to_dict(orient="records"), "monitoring/psi.json")
+    rows_processed = len(new_data)
 
     if schema.target in new_data.columns:
         metrics = evaluate_predictions(new_data[schema.target].values, probabilities)
         should_trigger_retrain = should_trigger_retrain or (metrics.get("pr_auc", 1.0) < settings.pipeline.pr_auc_shadow_threshold)
     else:
         metrics = {}
+
+    mlflow_client = MLflowClientWrapper()
+    with mlflow_client.start_run(run_name="batch_inference", tags={"run_id": run_id}) as mlflow_run:
+        mlflow_client.log_metrics({"psi_global": psi_global})
+        if metrics:
+            mlflow_client.log_metrics(metrics)
+        mlflow_client.log_metrics({"should_trigger_retrain": bool(should_trigger_retrain)})
+        mlflow_client.set_tags(
+            {
+                "retrain_candidate": str(should_trigger_retrain).lower(),
+                "prediction_rows": str(rows_processed),
+            }
+        )
+        mlflow_client.log_artifact(preds_path, artifact_path="predictions")
+        mlflow_client.log_dict(psi_df.to_dict(orient="records"), "monitoring/psi.json")
+        mlflow_client.log_dict(
+            {
+                "rows_processed": rows_processed,
+                "psi_global": psi_global,
+                "should_trigger_retrain": should_trigger_retrain,
+                "mlflow_run_id": mlflow_run.run_id,
+            },
+            "monitoring/summary.json",
+        )
 
     pg_logger = PostgresLogger.from_settings()
     try:
@@ -138,10 +159,17 @@ def run_batch_inference() -> InferenceArtifacts:
             run_id=run_id,
             started_at=datetime.utcnow(),
             finished_at=datetime.utcnow(),
-            rows_processed=len(new_data),
+            rows_processed=rows_processed,
             latency_ms=0,
             error_rate=float(1 - metrics.get("accuracy", 1.0)) if metrics else 0.0,
-            notes=json.dumps({"psi_global": psi_global, "metrics": metrics}),
+            notes=json.dumps(
+                {
+                    "psi_global": psi_global,
+                    "metrics": metrics,
+                    "should_trigger_retrain": should_trigger_retrain,
+                    "rows_processed": rows_processed,
+                }
+            ),
         )
     except Exception as exc:
         logger.warning("El registro en Postgres ha fallado: %s", exc)
@@ -152,6 +180,8 @@ def run_batch_inference() -> InferenceArtifacts:
         minio_uri=minio_uri,
         psi_global=psi_global,
         should_trigger_retrain=should_trigger_retrain,
+        rows_processed=rows_processed,
+        metrics=metrics,
     )
 
 

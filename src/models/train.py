@@ -23,6 +23,7 @@ from src.features.preprocessing import PreprocessingArtifacts, fit_preprocessing
 from src.features.schema_inference import DataSchema, infer_schema, load_dataset
 from src.io_clients.minio_client import MinioClient
 from src.io_clients.mlflow_client import MLflowClientWrapper
+from src.models.candidate_store import load_latest_candidate, persist_latest_candidate, select_best_candidate
 from src.models.tuning import CandidateModel, run_hyperparameter_search
 from src.utils.ml_utils import DatasetSplits, evaluate_predictions, stratified_train_valid_test_split
 from src.utils.plotting import plot_calibration, plot_lift, plot_precision_recall, plot_roc, save_figure
@@ -94,17 +95,6 @@ def _instantiate_estimator(candidate: CandidateModel):
         return CatBoostClassifier(**params)
     raise ValueError(f"Modelo candidato desconocido: {candidate.name}")
 
-
-def _select_best_candidate(candidates: list[CandidateModel]) -> CandidateModel:
-    def score(candidate: CandidateModel) -> float:
-        metrics = candidate.metrics
-        return 0.5 * metrics.get("pr_auc", 0.0) + 0.5 * metrics.get("roc_auc", 0.0)
-
-    best = max(candidates, key=score)
-    logger.info(" %s seleccionado como mejor modelo (score %.4f)", best.name, score(best))
-    return best
-
-
 def _prepare_training_entities(schema: Optional[DataSchema] = None) -> tuple[DatasetSplits, DataSchema, PreprocessingArtifacts]:
     settings = get_settings()
     df = load_dataset()
@@ -174,20 +164,26 @@ def _generate_and_log_figures(y_test: pd.Series, y_pred_proba: np.ndarray, featu
 
 def train_and_register_model() -> TrainingResult:
     settings = get_settings()
-    candidates, schema, _preproc_artifacts = run_hyperparameter_search()
-    best_candidate = _select_best_candidate(candidates)
+    stored_candidate = load_latest_candidate(settings, factory=CandidateModel)
+    schema = None
+
+    if stored_candidate:
+        best_candidate = stored_candidate
+        logger.info("Usando candidato almacenado '%s' para el entrenamiento final", best_candidate.name)
+    else:
+        logger.info("No se encontró candidato almacenado; ejecutando búsqueda de hiperparámetros")
+        candidates, schema, _ = run_hyperparameter_search()
+        best_candidate = select_best_candidate(candidates)
 
     splits, metadata, preproc_artifacts = _prepare_training_entities(schema)
     preprocessor = preproc_artifacts.pipeline.named_steps["preprocess"]
     model_pipeline = SkPipeline(steps=[("preprocess", preprocessor), ("estimator", _instantiate_estimator(best_candidate))])
-    X_train_full = pd.concat([splits.X_train, splits.X_valid])
-    y_train_full = pd.concat([splits.y_train, splits.y_valid])
-    model_pipeline.fit(X_train_full, y_train_full)
+
+    model_pipeline.fit(pd.concat([splits.X_train, splits.X_valid]), pd.concat([splits.y_train, splits.y_valid]))
     y_test = splits.y_test.reset_index(drop=True)
     y_pred_proba = model_pipeline.predict_proba(splits.X_test)[:, 1]
-    feature_names = metadata["feature_names"]
-    X_test_preprocessed = preprocessor.transform(splits.X_test)
 
+    X_test_preprocessed = preprocessor.transform(splits.X_test)
     metrics = evaluate_predictions(y_test.values, y_pred_proba)
 
     run_identifier = uuid.uuid4().hex[:12]
@@ -197,18 +193,27 @@ def train_and_register_model() -> TrainingResult:
     packed_model = {
         "pipeline": model_pipeline,
         "schema": metadata["schema"],
-        "feature_names": feature_names,
+        "feature_names": metadata["feature_names"],
         "trained_at": datetime.utcnow().isoformat(),
         "metrics": metrics,
     }
     joblib.dump(packed_model, model_path)
 
+    figures_dir = model_dir / "figures" / run_identifier
     mlflow_client = MLflowClientWrapper()
     with mlflow_client.start_run(run_name="train_final_model", tags={"model": best_candidate.name}) as mlflow_run:
         mlflow_client.log_params({f"best_{best_candidate.name}_{key}": value for key, value in best_candidate.params.items()})
         mlflow_client.log_metrics(metrics)
         mlflow_client.log_artifact(model_path, artifact_path="model")
-        _generate_and_log_figures(y_test, y_pred_proba, feature_names, model_pipeline.named_steps["estimator"], X_test_preprocessed, model_dir , "figures" / run_identifier, mlflow_client)
+        _generate_and_log_figures(
+            y_test,
+            y_pred_proba,
+            metadata["feature_names"],
+            model_pipeline.named_steps["estimator"],
+            X_test_preprocessed,
+            figures_dir,
+            mlflow_client,
+        )
         mlflow_client.set_tags({"stage": "training", "model_name": best_candidate.name, "run_identifier": run_identifier})
 
         try:
@@ -237,6 +242,8 @@ def train_and_register_model() -> TrainingResult:
         minio_uri = minio_client.upload_file(model_path, bucket=settings.minio.bucket_models, object_name=object_name)
     except Exception as exc: 
         logger.warning("Falló la subida del modelo a MinIO: %s", exc)
+
+    persist_latest_candidate(settings, best_candidate)
 
     return TrainingResult(
         run_id=run_identifier,

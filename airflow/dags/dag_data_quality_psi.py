@@ -62,7 +62,7 @@ def data_quality_pipeline():
     @task
     def publish_summary(artifacts_dict):
         logger.info("Data Quality: %s", json.dumps(artifacts_dict, indent=2))
-        return artifacts_dict["run_id"]  # type: ignore[index]
+        return artifacts_dict["run_id"]
 
     baseline_info = ensure_baseline()
     artifacts_info = compute_reports(baseline_info)

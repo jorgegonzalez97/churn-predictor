@@ -181,8 +181,10 @@ def compute_quality_and_psi(current_df: Optional[pd.DataFrame] = None) -> DataQu
     df_reference = extract_baseline_if_missing(df_current)
 
     sample_size = settings.pipeline.dq_sample_size()
+
     df_current_for_report = df_current
     df_reference_for_report = df_reference
+    
     if sample_size and len(df_current) > sample_size:
         df_current_for_report = df_current.sample(
             n=sample_size,

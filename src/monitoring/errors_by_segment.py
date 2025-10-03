@@ -1,4 +1,4 @@
-"""Segment-level error breakdowns."""
+"""Errores por segmento"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,7 +23,7 @@ class SegmentReport:
     minio_uri: Optional[str]
 
 
-def build_segment_report(scored_df: pd.DataFrame, target_column: str, proba_column: str, segment_column: Optional[str] = None, n_segments: int = 10) -> SegmentReport:
+def build_segment_report(scored_df: pd.DataFrame, target_column: str, proba_column: str, segment_column = None, n_segments = 10) -> SegmentReport:
     settings = get_settings()
     work_dir = settings.paths.reports_path() / "segments"
     work_dir.mkdir(parents=True, exist_ok=True)

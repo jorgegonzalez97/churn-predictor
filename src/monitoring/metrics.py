@@ -1,11 +1,9 @@
-"""Post-deployment metric computations."""
+"""Análisis de métricas del modelo."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
-
-import pandas as pd
+from typing import Dict
 
 from src.config import get_settings
 from src.io_clients.minio_client import MinioClient
@@ -21,7 +19,7 @@ class MonitoringReport:
     minio_uris: Dict[str, str]
 
 
-def compute_post_deployment_metrics(scored_df: pd.DataFrame, target_column: str, proba_column: str, period_column: Optional[str] = None, output_dir: Optional[Path] = None) -> MonitoringReport:
+def compute_post_deployment_metrics(scored_df, target_column: str, proba_column: str, period_column = None, output_dir = None) -> MonitoringReport:
     settings = get_settings()
     output_dir = output_dir or (settings.paths.reports_path() / "monitoring")
     output_dir.mkdir(parents=True, exist_ok=True)

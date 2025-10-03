@@ -11,10 +11,10 @@ Pipeline de churn listo para producción orquestado con Airflow y Docker Compose
 | MLflow   | Tracking de experimentos y Model Registry | `mlflow` | `5000` (mapeado a `127.0.0.1:5001`) |
 | MinIO    | Almacenamiento de artefactos y modelos (compatible S3) | `minio` | `9000` + consola `9001` |
 
-**Buckets** que crea `scripts/bootstrap_minio.sh`:
+**Buckets** que crea el lanzamiento de minio-setup:
 
 - `mlflow` (artefactos de MLflow)
-- `models` (pipelines `.joblib` versionados)
+- `models` (pipelines y modelos `.joblib` versionados)
 - `reports` (PSI, monitoreo, reportes de drift en HTML/PDF)
 - `predictions` (salidas de scoring batch)
 
@@ -23,11 +23,13 @@ Pipeline de churn listo para producción orquestado con Airflow y Docker Compose
 ```
 .
 ├─ airflow/
-│  └─ dags/
-│     ├─ dag_data_quality_psi.py
-│     ├─ dag_train_register.py
-│     ├─ dag_predict_new_data.py
-│     └─ dag_monitoring.py
+│  ├─ dags/
+│  │  ├─ dag_data_quality_psi.py
+│  │  ├─ dag_model_selection_tuning.py
+│  │  ├─ dag_model_training_deployment.py
+│  │  ├─ dag_predict_new_data.py
+│  │  └─ dag_monitoring.py
+│  └─ requirements.txt
 ├─ src/
 │  ├─ config.py
 │  ├─ features/
@@ -35,9 +37,7 @@ Pipeline de churn listo para producción orquestado con Airflow y Docker Compose
 │  ├─ monitoring/
 │  ├─ io/
 │  └─ utils/
-├─ scripts/bootstrap_minio.sh
 ├─ sql/create_monitoring_tables.sql
-├─ requirements.txt
 └─ data/
    ├─ dataset.csv
    └─ data_descriptions.csv
@@ -47,10 +47,10 @@ Módulos principales:
 
 - `src/features`: inferencia de esquema, preprocesamiento, generación de PSI y reportes de calidad.
 - `src/models`: tuning con Optuna, entrenamiento + registro en MLflow, inferencia batch.
-- `src/monitoring`: reportes de drift, métricas post-despliegue, análisis por segmentos.
+- `src/monitoring`: reportes de métricas post-despliegue y análisis por segmentos.
 - `src/io`: wrappers ligeros para MinIO, MLflow y Postgres.
 
-En `src/data` hay symlinks hacia los CSV canónicos ubicados en `data/`.
+En `src/data` se almacenan los CSV canónicos ubicados en `data/`.
 
 ## 3. Prerrequisitos
 
@@ -59,7 +59,7 @@ En `src/data` hay symlinks hacia los CSV canónicos ubicados en `data/`.
    cp .env.example .env
    # actualiza AIRFLOW_UID, contraseñas, credenciales de MinIO, etc.
    ```
-2. (Opcional) Crea un entorno virtual si ejecutarás scripts localmente:
+2. (Opcional) Crea un entorno virtual si vas a ejecutar scripts localmente:
    ```bash
    python -m venv .venv
    source .venv/bin/activate
@@ -74,11 +74,11 @@ docker compose up -d
 
 Asistentes de primera ejecución (se automatizan al levantar `docker compose up`):
 
-- `minio-setup` usa `mc` dentro de un contenedor efímero para crear los buckets `mlflow`, `models`, `reports` y `predictions`. Para relanzarlo manualmente:
+- `minio-setup` usa `mc` dentro de un contenedor para crear los buckets `mlflow`, `models`, `reports` y `predictions`. Para relanzarlo manualmente:
   ```bash
   docker compose run --rm minio-setup
   ```
-- `postgres-monitoring-init` aplica `sql/create_monitoring_tables.sql` contra la base `airflow`. Para reejecutarlo manualmente:
+- `postgres-monitoring-init` aplica `sql/create_monitoring_tables.sql` contra la base de datos. Para reejecutarlo manualmente:
   ```bash
   docker compose run --rm postgres-monitoring-init
   ```

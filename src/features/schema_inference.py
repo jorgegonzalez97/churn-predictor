@@ -92,8 +92,15 @@ def infer_schema(dataset: pd.DataFrame) -> DataSchema:
     numeric_cols = []
     categorical_cols = []
     high_cardinality = []
+    
+    #print(dataset.columns)
+    all_feat = ['rev_Mean', 'mou_Mean', 'totmrc_Mean','da_Mean','ovrmou_Mean','datovr_Mean','roam_Mean','change_mou', 'change_rev',
+        'unan_vce_Mean', 'plcd_dat_Mean','custcare_Mean','ccrndmou_Mean','inonemin_Mean','threeway_Mean','mou_rvce_Mean',
+        'owylis_vce_Mean', 'mouowylisv_Mean','iwylis_vce_Mean','mouiwylisv_Mean','mou_peav_Mean','mou_pead_Mean','mou_opkv_Mean','mou_opkd_Mean',
+        'drop_blk_Mean', 'callwait_Mean','months','uniqsubs','actvsubs','new_cell','crclscod','asl_flag','totrev','adjqty','avg6rev',
+        'prizm_social_one','area','dualband','refurb_new','hnd_price','models','hnd_webcap','lor','marital','adults','income','ethnic','creditcd','eqpdays','Customer_ID']
 
-    for column in dataset.columns:
+    for column in all_feat:
         if column == target_col:
             continue
         if id_col and column == id_col:

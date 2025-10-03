@@ -11,29 +11,14 @@ import optuna
 import pandas as pd
 from optuna.integration.mlflow import MLflowCallback
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import StratifiedKFold
-
-try:
-    from lightgbm import LGBMClassifier
-except Exception as exc:
-    LGBMClassifier = None 
-
-try:
-    from xgboost import XGBClassifier
-except Exception: 
-    XGBClassifier = None 
-
-try:
-    from catboost import CatBoostClassifier, Pool
-except Exception:
-    CatBoostClassifier = None
-    Pool = None
+#from sklearn.metrics import roc_auc_score
+#from sklearn.model_selection import StratifiedKFold
 
 from src.config import get_settings
 from src.features.preprocessing import PreprocessingArtifacts, fit_preprocessing_pipeline
 from src.features.schema_inference import DataSchema, infer_schema, load_dataset
 from src.io_clients.mlflow_client import MLflowClientWrapper
+from src.models.candidate_store import persist_latest_candidate, select_best_candidate
 from src.utils.ml_utils import evaluate_predictions, stratified_train_valid_test_split
 
 logger = logging.getLogger(__name__)
@@ -76,8 +61,11 @@ def _prepare_datasets(schema: Optional[DataSchema] = None):
 
 
 def _objective_lightgbm(trial: optuna.Trial, X_train: pd.DataFrame, y_train: pd.Series, validation: Dict[str, pd.Series]) -> float:
-    if LGBMClassifier is None:
-        raise RuntimeError("LightGBM no se encuentra instalada")
+    try:
+        from lightgbm import LGBMClassifier
+    except Exception as exc:
+        raise RuntimeError("LGBMClassifier no se encuentra instalado")
+
     params = {
         "n_estimators": trial.suggest_int("n_estimators", 200, 800),
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
@@ -110,7 +98,9 @@ def _objective_logistic(trial: optuna.Trial, X_train: pd.DataFrame, y_train: pd.
     return 0.5 * metrics["roc_auc"] + 0.5 * metrics["pr_auc"]
 
 def _objective_xgb(trial: optuna.Trial, X_train: pd.DataFrame, y_train: pd.Series, validation: Dict[str, pd.Series]) -> float:
-    if XGBClassifier is None:
+    try:
+        from xgboost import XGBClassifier
+    except Exception: 
         raise RuntimeError("XGBClassifier no se encuentra instalado")
     params = {
         "n_estimators": trial.suggest_int("n_estimators", 200, 600),
@@ -125,7 +115,6 @@ def _objective_xgb(trial: optuna.Trial, X_train: pd.DataFrame, y_train: pd.Serie
         "eval_metric": "logloss",
         "random_state": get_settings().pipeline.random_state,
         "n_jobs": -1,
-        "use_label_encoder": False,
     }
     model = XGBClassifier(**params)
     model.fit(X_train, y_train, eval_set=[(validation["X_valid"], validation["y_valid"])], verbose=False)
@@ -135,11 +124,13 @@ def _objective_xgb(trial: optuna.Trial, X_train: pd.DataFrame, y_train: pd.Serie
     return 0.5 * metrics["roc_auc"] + 0.5 * metrics["pr_auc"]
 
 def _objective_catboost(trial: optuna.Trial, X_train: pd.DataFrame, y_train: pd.Series, validation: Dict[str, pd.Series], schema)-> float:
-    if CatBoostClassifier is None:
+    try:
+        from catboost import CatBoostClassifier, Pool
+    except Exception:
         raise RuntimeError("CatBoostClassifier no se encuentra instalado")
     
     # Marca columnas categóricas por dtype para que CatBoost las trate de forma nativa
-    cat_features = [X_train.columns.get_loc(col) for col in schema.categorical_columns if col in X_train.columns]
+    cat_features = [X_train.columns.get_loc(col) for col in schema.categorical if col in X_train.columns]
 
     params = {
         "iterations": trial.suggest_int("iterations", 300, 1000),
@@ -162,9 +153,11 @@ def _objective_catboost(trial: optuna.Trial, X_train: pd.DataFrame, y_train: pd.
         "task_type": "CPU",
     }
 
-    # CatBoost solo usa subsample con ciertos bootstrap_type
+    # CatBoost solo usa baggin temp con bayesian
     if params["bootstrap_type"] == "Bayesian":
         params.pop("subsample", None)
+    else:
+        params.pop("bagging_temperature", None)
 
     train_pool = Pool(X_train, label=y_train, cat_features=cat_features or None)
     valid_pool = Pool(validation["X_valid"], label=validation["y_valid"], cat_features=cat_features or None)
@@ -187,50 +180,48 @@ def run_hyperparameter_search(schema: Optional[DataSchema] = None) -> Tuple[List
     mlflow_callback = MLflowCallback(tracking_uri=get_settings().mlflow.tracking_uri, metric_name="val_score")
 
     logger.info("Empezando optimización de parámetros con Optuna para el Logistic Regression baseline")
-    study_logreg = optuna.create_study(direction="maximize", study_name="logreg_baseline")
-    study_logreg.optimize(
+    study = optuna.create_study(direction="maximize", study_name="logreg_baseline")
+    study.optimize(
         lambda trial: _objective_logistic(trial, X_train, y_train, validation),
-        n_trials=max(5, settings.pipeline.optuna_n_trials),
+        n_trials=settings.pipeline.optuna_n_trials,
         callbacks=[mlflow_callback],
         show_progress_bar=True,
     )
-    best_trial = study_logreg.best_trial
+    best_trial = study.best_trial
     candidates.append(CandidateModel(name="logistic_regression", params=best_trial.params, metrics=best_trial.user_attrs["metrics"]))
 
-    if LGBMClassifier is not None:
-        logger.info("Empezando optimización de parámetros con Optuna para el LightGBM baseline")
-        study_lgbm = optuna.create_study(direction="maximize", study_name="lightgbm")
-        study_lgbm.optimize(
-            lambda trial: _objective_lightgbm(trial, X_train, y_train, validation),
-            n_trials=max(5, settings.pipeline.optuna_n_trials),
-            callbacks=[mlflow_callback],
-            show_progress_bar=True,
-        )
-        best_trial = study_lgbm.best_trial
-        candidates.append(CandidateModel(name="lightgbm", params=best_trial.params, metrics=best_trial.user_attrs["metrics"]))
+    logger.info("Empezando optimización de parámetros con Optuna para el LightGBM baseline")
+    study = optuna.create_study(direction="maximize", study_name="lightgbm")
+    study.optimize(
+        lambda trial: _objective_lightgbm(trial, X_train, y_train, validation),
+        n_trials=settings.pipeline.optuna_n_trials,
+        callbacks=[mlflow_callback],
+        show_progress_bar=True,
+    )
+    best_trial = study.best_trial
+    candidates.append(CandidateModel(name="lightgbm", params=best_trial.params, metrics=best_trial.user_attrs["metrics"]))
 
-    if XGBClassifier is not None:
-        logger.info("Empezando optimización de parámetros con Optuna para el XGBoost baseline")
-        study_xgb = optuna.create_study(direction="maximize", study_name="xgboost")
-        study_xgb.optimize(
-            lambda trial: _objective_xgb(trial, X_train, y_train, validation),
-            n_trials=max(5, settings.pipeline.optuna_n_trials),
-            callbacks=[mlflow_callback],
-            show_progress_bar=True,
-        )
-        best_trial = study_xgb.best_trial
-        candidates.append(CandidateModel(name="xgboost", params=best_trial.params, metrics=best_trial.user_attrs["metrics"]))
+    logger.info("Empezando optimización de parámetros con Optuna para el XGBoost baseline")
+    study = optuna.create_study(direction="maximize", study_name="xgboost")
+    study.optimize(
+        lambda trial: _objective_xgb(trial, X_train, y_train, validation),
+        n_trials=settings.pipeline.optuna_n_trials,
+        callbacks=[mlflow_callback],
+        show_progress_bar=True,
+    )
+    best_trial = study.best_trial
+    candidates.append(CandidateModel(name="xgboost", params=best_trial.params, metrics=best_trial.user_attrs["metrics"]))
     
-    if CatBoostClassifier is not None:
+    if False:
         logger.info("Empezando optimización de parámetros con Optuna para el CatBoostClassifie baseliner")
-        study_cat = optuna.create_study(direction="maximize", study_name="xgboost")
-        study_cat.optimize(
+        study = optuna.create_study(direction="maximize", study_name="catboost")
+        study.optimize(
             lambda trial: _objective_catboost(trial, X_train, y_train, validation, schema),
-            n_trials=max(5, settings.pipeline.optuna_n_trials),
+            n_trials=settings.pipeline.optuna_n_trials,
             callbacks=[mlflow_callback],
             show_progress_bar=True,
         )
-        best_trial = study_cat.best_trial
+        best_trial = study.best_trial
         candidates.append(CandidateModel(name="catboost", params=best_trial.params, metrics=best_trial.user_attrs["metrics"]))
 
     with mlflow_client.start_run(run_name="hyperparameter_tuning"):
@@ -238,6 +229,12 @@ def run_hyperparameter_search(schema: Optional[DataSchema] = None) -> Tuple[List
         mlflow_client.log_dict(summary, "tuning/candidates.json")
         aggregate_metrics = {f"best_{candidate.name}_roc_auc": candidate.metrics["roc_auc"] for candidate in candidates}
         mlflow_client.log_metrics(aggregate_metrics)
+
+    try:
+        best_candidate = select_best_candidate(candidates)
+        persist_latest_candidate(settings, best_candidate)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning("No se pudo persistir el mejor candidato: %s", exc)
 
     return candidates, schema, artifacts
 
