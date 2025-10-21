@@ -76,7 +76,7 @@ def load_data_description() -> Dict[str, str]:
 def infer_schema(dataset: pd.DataFrame) -> DataSchema:
     """Análisis de estructura de los datos automática basada en reglas:
             Columnas numéricas con baja cardinalidad codificadas como categóricas
-            Varibles ID no se utilizan en el entreno"""
+            Varible ID no se utilizan en el entreno"""
 
     settings = get_settings()
     target_col = settings.pipeline.target_column
